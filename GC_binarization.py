@@ -27,7 +27,7 @@ class Binariization():
         n:n副格雷码图像
         
     '''
-    def __init__(self, datapath, th, width = 2448, height = 2048,edge_length:int=2000):
+    def __init__(self, datapath, th, width = 2432, height = 2048,edge_length:int=2000):
         self.th1, self.th2, self.th3, self.th4, self.th5 = th
         self.datapath = datapath
         self.width = width
