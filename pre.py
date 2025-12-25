@@ -23,6 +23,23 @@ class PMD():
         self.width = width
         self.height = height
         self.th = th
+    
+    def get_graycodes(self):
+        datapath = self.datapath
+        th = self.th
+        B = Binariization(datapath, th=th, width= self.width, height=self.height)
+        W = WrappedPhase(datapath, width=self.width, height=self.height)
+
+        gc = B.get_GC_images()     
+        I = W.getImageData()
+
+        # 计算调制度  
+        _, env_brightness = W.computeModulation(I)
+        I_off = env_brightness/4
+        
+
+
+
 
     def compute_phase_cuda(self):
         datapath = self.datapath
@@ -82,18 +99,26 @@ def extra_region_through_binary(img):
     # img = cv2.erode(img, kernel, iterations=1)
     return img
 
+def extra_region_through_graycode(gc):
+    pass
+
+
 if __name__ == "__main__":
-    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\48', th = [0.6, 1.9, 1.4, 1.2, 1.2])
-    result = aa.compute_phase_cuda()
-    modulation, env_brightness = aa.compute_modulation()
-    # cv2.imwrite('output/abs_phase.png',result)
+    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th = [0.6, 1.9, 1.4, 1.2, 1.2])
+    # result = aa.compute_phase_cuda()
+    # modulation, env_brightness = aa.compute_modulation()
+    # # cv2.imwrite('output/abs_phase.png',result)
 
-    modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
-    cv2.imwrite('output/modulation.png',modulation)
-    cv2.imwrite('output/env_brightness.png',env_brightness)
+    # modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
+    # cv2.imwrite('output/modulation.png',modulation)
+    # cv2.imwrite('output/env_brightness.png',env_brightness)
 
-    mask = extra_region_through_binary(modulation)
-    cv2.imwrite('output/mask.png',mask)
+    # mask = extra_region_through_binary(modulation)
+    # cv2.imwrite('output/mask.png',mask)
+
+    gc = aa.get_graycodes()
+    gc[0] = gc[0]|gc[1]|gc[2]|gc[3]|gc[4]
+    cv2.imwrite('output/gc_mask.png',gc[0])
 
 
 
