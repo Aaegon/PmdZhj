@@ -115,11 +115,11 @@ def extra_region_through_graycode(gc):
 
 
 if __name__ == "__main__":
-    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\22', th = [0.6, 1.9, 1.4, 1.2, 1.2])
+    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th = [0.6, 1.9, 1.4, 1.2, 1.2])
     result = aa.compute_phase_cuda()
     modulation, env_brightness = aa.compute_modulation()
     # cv2.imwrite('output/abs_phase.png',result)
-
+    final = np.stack([result, modulation, env_brightness], axis = 2)
     modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
     cv2.imwrite('output/modulation.png',modulation)
     cv2.imwrite('output/env_brightness.png',env_brightness)
@@ -129,6 +129,9 @@ if __name__ == "__main__":
 
     gc = aa.get_graycodes(0.12)
     cv2.imwrite('output/gc_mask.png',gc)
+
+    final[mask==0] = 255
+    cv2.imwrite('output/result.png',final)
 
 
 
