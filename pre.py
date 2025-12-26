@@ -10,7 +10,7 @@ import cv2
 import torchvision.transforms as transforms
 
 '''
-功能：调用PMD，有效区域提取，绝对相位效果评价
+功能：调用PMD，有效区域提取
 '''
 
 
@@ -23,20 +23,30 @@ class PMD():
         self.width = width
         self.height = height
         self.th = th
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    def get_graycodes(self):
+    def get_graycodes(self, T):
         datapath = self.datapath
         th = self.th
         B = Binariization(datapath, th=th, width= self.width, height=self.height)
         W = WrappedPhase(datapath, width=self.width, height=self.height)
-
-        gc = B.get_GC_images()     
+        # 获取格雷码
+        gc = B.get_GC_images()
+        gc = torch.from_numpy(gc.astype(np.float32)).to(self.device)
+        # 获取四步正弦计算光源的直流分量+环境光   
         I = W.getImageData()
-
-        # 计算调制度  
         _, env_brightness = W.computeModulation(I)
-        I_off = env_brightness/4
-        
+        env_brightness_ = env_brightness/4*255
+        # 用直流分量平替Ioff
+        I_off = env_brightness_.unsqueeze(0).repeat(5, 1, 1)
+        #计算置信度
+        N = torch.abs(gc-I_off)/(gc+1e-6)
+        confidence = torch.min(N, dim=0, keepdim=False)[0]
+        mask = confidence > T
+        result = torch.where(mask, torch.tensor(255, dtype=torch.uint8, device = self.device), 
+                                   torch.tensor(0, dtype=torch.uint8, device = self.device))
+        return result.cpu().numpy()
+
 
 
 
@@ -77,10 +87,9 @@ class PMD():
         modulation = modulation.to(torch.uint8)
         env_brightness = (env_brightness-env_brightness.min())/(env_brightness.max() - env_brightness.min())*255
         env_brightness = env_brightness.to(torch.uint8)
-
-        
+        # 返回调制度和总光强
         return modulation.cpu().numpy(), env_brightness.cpu().numpy()    
-
+## 调制度提取有效区域
 def extra_region_through_binary(img):
     # 全局阈值，采用分位数确定阈值，腐蚀膨胀腐蚀，适用于modulation，比env_bri(总亮度)要好调参并且形态学操作更少
     threshold_value_0 = np.percentile(img, 30)
@@ -89,14 +98,16 @@ def extra_region_through_binary(img):
     idx_255 = img >= threshold_value_255
     img[idx_255] = 255
     img[idx_0] = 0
-    kernel_15 = np.ones((15, 15), np.uint8)
-    kernel_20 = np.ones((20, 20), np.uint8)
-    kernel_5 = np.ones((5, 5), np.uint8)
+    # # 矩形核
+    # kernel_15 = np.ones((15, 15), np.uint8)
+    # kernel_20 = np.ones((20, 20), np.uint8)
+    # kernel_5 = np.ones((5, 5), np.uint8)
+    # 椭圆核
+    kernel_15 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    kernel_20 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
 
     img = cv2.erode(img, kernel_15, iterations=2)
     img = cv2.dilate(img, kernel_20, iterations=2)
-    # kernel = np.ones((15, 15), np.uint8)
-    # img = cv2.erode(img, kernel, iterations=1)
     return img
 
 def extra_region_through_graycode(gc):
@@ -104,21 +115,20 @@ def extra_region_through_graycode(gc):
 
 
 if __name__ == "__main__":
-    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th = [0.6, 1.9, 1.4, 1.2, 1.2])
-    # result = aa.compute_phase_cuda()
-    # modulation, env_brightness = aa.compute_modulation()
-    # # cv2.imwrite('output/abs_phase.png',result)
+    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\22', th = [0.6, 1.9, 1.4, 1.2, 1.2])
+    result = aa.compute_phase_cuda()
+    modulation, env_brightness = aa.compute_modulation()
+    # cv2.imwrite('output/abs_phase.png',result)
 
-    # modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
-    # cv2.imwrite('output/modulation.png',modulation)
-    # cv2.imwrite('output/env_brightness.png',env_brightness)
+    modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
+    cv2.imwrite('output/modulation.png',modulation)
+    cv2.imwrite('output/env_brightness.png',env_brightness)
 
-    # mask = extra_region_through_binary(modulation)
-    # cv2.imwrite('output/mask.png',mask)
+    mask = extra_region_through_binary(modulation)
+    cv2.imwrite('output/mask.png',mask)
 
-    gc = aa.get_graycodes()
-    gc[0] = gc[0]|gc[1]|gc[2]|gc[3]|gc[4]
-    cv2.imwrite('output/gc_mask.png',gc[0])
+    gc = aa.get_graycodes(0.12)
+    cv2.imwrite('output/gc_mask.png',gc)
 
 
 
