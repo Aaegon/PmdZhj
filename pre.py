@@ -113,9 +113,20 @@ def extra_region_through_binary(img):
 def extra_region_through_graycode(gc):
     pass
 
+def get_modulations_from_datapath(datafolder, savefolder):
+    # 从原始图像中提取modulation用于labelme标定
+
+    all_items = os.listdir(datafolder)
+    for item in all_items:
+        full_path = os.path.join(datafolder, item)
+        save_path = os.path.join(savefolder, item) + '.png'
+        aa = PMD(datapath = full_path, th = [0.6, 1.9, 1.4, 1.2, 1.2])
+        modulation, env_brightness = aa.compute_modulation()
+        cv2.imwrite(save_path,modulation)
+    print("deal down!")
 
 if __name__ == "__main__":
-    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th = [0.6, 1.9, 1.4, 1.2, 1.2])
+    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th =  [0.6, 1.9, 1.4, 1.2, 1.2])
     result = aa.compute_phase_cuda()
     modulation, env_brightness = aa.compute_modulation()
     # cv2.imwrite('output/abs_phase.png',result)
@@ -132,6 +143,7 @@ if __name__ == "__main__":
 
     final[mask==0] = 255
     cv2.imwrite('output/result.png',final)
+    # get_modulations_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\modulations')
 
 
 

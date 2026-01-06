@@ -93,8 +93,9 @@ class WrappedPhase():
         #############################################################################
         env_brightness = i0 + i1 + i2 + i3
         pha_brightness = torch.sqrt((i3-i1)**2 + (i0-i2)**2)
+        epsilon = 1e-8
         ## 调制度
-        modulation = pha_brightness/env_brightness
+        modulation = pha_brightness/(env_brightness + epsilon)
         return modulation, env_brightness
     def computeWrappedphase_M_D(self, I):
         '''生成分子相位和分母相位
