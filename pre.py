@@ -47,10 +47,6 @@ class PMD():
                                    torch.tensor(0, dtype=torch.uint8, device = self.device))
         return result.cpu().numpy()
 
-
-
-
-
     def compute_phase_cuda(self):
         datapath = self.datapath
         th = self.th
@@ -125,6 +121,21 @@ def get_modulations_from_datapath(datafolder, savefolder):
         cv2.imwrite(save_path,modulation)
     print("deal down!")
 
+def get_masks_from_datapath(datafolder, savefolder):
+    # 从原始图像中提取mask
+    all_items = os.listdir(datafolder)
+    for item in all_items:
+        full_path = os.path.join(datafolder, item)
+        save_path = os.path.join(savefolder, item) + '.png'
+        aa = PMD(datapath = full_path, th = [0.6, 1.9, 1.4, 1.2, 1.2])
+        modulation, env_brightness = aa.compute_modulation()
+        modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
+
+        mask = extra_region_through_binary(modulation)
+        cv2.imwrite(save_path, mask)
+        
+    print("deal down!")
+
 if __name__ == "__main__":
     aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th =  [0.6, 1.9, 1.4, 1.2, 1.2])
     result = aa.compute_phase_cuda()
@@ -144,6 +155,7 @@ if __name__ == "__main__":
     final[mask==0] = 255
     cv2.imwrite('output/result.png',final)
     # get_modulations_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\modulations')
+    # get_masks_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\masks')
 
 
 
