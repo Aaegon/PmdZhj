@@ -135,6 +135,33 @@ class WrappedPhase():
         
     
         return pha
+    def computeModulation(self, I):
+        '''生成分子相位和分母相位
+
+        Args:
+        I: 相机捕捉的相位图数组
+        width, height: 照片的尺寸
+
+        return: 真实相位[0,2*pi], pha.shape(width, height), tensor,cuda:0
+
+        '''
+        
+        i0 = torch.tensor(I[0], dtype=torch.float32).to(self.device)/255
+        i1 = torch.tensor(I[1], dtype=torch.float32).to(self.device)/255
+        i2 = torch.tensor(I[2], dtype=torch.float32).to(self.device)/255
+        i3 = torch.tensor(I[3], dtype=torch.float32).to(self.device)/255
+        ## 环境亮度
+        env_brightness = torch.zeros((self.height, self.width), dtype=torch.float32).to(self.device)
+        ## 相位亮度变化
+        pha_brightness = torch.zeros((self.height, self.width), dtype=torch.float32).to(self.device)
+        
+        #############################################################################
+        env_brightness = i0 + i1 + i2 + i3
+        pha_brightness = torch.sqrt((i3-i1)**2 + (i0-i2)**2)
+        epsilon = 1e-8
+        ## 调制度
+        modulation = pha_brightness/(env_brightness + epsilon)
+        return modulation, env_brightness
 
 
 
