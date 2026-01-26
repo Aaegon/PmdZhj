@@ -27,7 +27,7 @@ class WrappedPhase():
     height:相机采集图像的高
     '''
 
-    def __init__(self, datapath, width:int = 2448,height:int = 2048,n:int = 4):#12801024
+    def __init__(self, datapath, width:int = 2432,height:int = 2048,n:int = 4):#12801024
         self.n = n
         self.datapath = datapath
         self.width = width

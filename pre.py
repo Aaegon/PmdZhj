@@ -3,6 +3,7 @@ from wrapped_phase_filter import WrappedPhase
 from Unwrapped_phase import Unwrappedphase
 import numpy as np
 import torch
+import ast
 import os
 import math
 import statistics
@@ -74,6 +75,36 @@ class PMD():
         absphase = U.get_absphase(series, series1, wph)
         absphase_scale = ((absphase * 255) / (2 ** U.n * np.pi)).to(torch.uint8)  # 映射到灰度值
         return absphase_scale.cpu().numpy()
+    def compute_phase_series_modulations_cuda(self):
+        #计算折叠相位，调制度，绝对级数
+        datapath = self.datapath
+        th = self.th
+
+        W = WrappedPhase(datapath, width=self.width, height=self.height)
+        B = Binariization(datapath, th=th, width= self.width, height=self.height)
+        U = Unwrappedphase(datapath, row=self.height, col= self.width)
+
+        # 计算折叠相位
+        I = W.getImageData()
+        wph = W.computeWrappedphase(I)
+
+        # 格雷码二值化
+        gc = B.get_Binary_wph(10)
+
+        # 计算绝对级数
+        series, series1 = U.gray_to_series(gc)
+        series1 = series1.int().to(torch.uint8)
+        abs_series = torch.zeros_like(series, dtype=torch.uint8).to(self.device)
+        idx1 = wph <= (math.pi / 2)
+        idx2 = (wph > (math.pi / 2)) & (wph < (3 * math.pi / 2))
+        idx3 = wph >= (3 * math.pi / 2)
+        abs_series[idx1] = series1[idx1]
+        abs_series[idx2] = series[idx2]
+        abs_series[idx3] = series1[idx3] - 1
+
+        # 计算调制度  
+        modulation, _ = W.computeModulation(I)
+        return wph.cpu().numpy(), abs_series.cpu().numpy(), modulation.cpu().numpy()
     
     def get_raw_modulation(self):
         datapath = self.datapath
@@ -126,7 +157,6 @@ def extra_region_through_graycode(gc):
 
 def get_modulations_from_datapath(datafolder, savefolder):
     # 从原始图像中提取modulation用于labelme标定
-
     all_items = os.listdir(datafolder)
     for item in all_items:
         full_path = os.path.join(datafolder, item)
@@ -150,30 +180,74 @@ def get_masks_from_datapath(datafolder, savefolder):
         cv2.imwrite(save_path, mask)
         
     print("deal down!")
+def visualize_demo(img, savepath):
+    #简单的保存可视化验证
+
+    result = (img-img.min())/(img.max()-img.min() + 1e-8) * 255
+    result = result.astype(np.uint8)
+    print(np.percentile(result, 50), np.percentile(result, 85))
+    cv2.imwrite(savepath, img)
+
+def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_2026v0.txt'):
+    '''
+    保存数据：
+    折叠相位 wrapped_phase float32
+    调制度   modulation    float32
+    相位级数 series        int
+    '''
+    ths = {}
+    with open(th_txt, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            idx, list_str = line.split(maxsplit=1)  # 只分一次
+            values = ast.literal_eval(list_str)      # 字符串转 Python list
+
+            ths[idx] = values
+    # aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\17', th =  [5.0, 2.4, 1.9000000000000001, 3.7, 2.2])
+    # wph, series, modulation = aa.compute_phase_series_modulations_cuda()
+    files = os.listdir(datafolder)
+    for file in files:
+        th = ths[file]
+        path = os.path.join(datafolder, file)
+        savefile = os.path.join(savefolder, file) + '.npy'
+        aa = PMD(path, th)
+        wph, series, modulation = aa.compute_phase_series_modulations_cuda()
+        mod = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
+        data = {
+            "wph": wph.astype(np.float32),
+            "modulation": mod.astype(np.float32),
+            "series": series.astype(np.int16)
+        }
+
+        np.save(savefile, data)
 
 if __name__ == "__main__":
-    aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\13', th =  [0.6, 1.9, 1.4, 1.2, 1.2])
-    result = aa.compute_phase_cuda()
-    modulation, env_brightness = aa.compute_modulation()
+    # aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\17', th =  [0.6, 1.9, 1.4, 1.2, 1.2])
+    # result = aa.compute_phase_cuda()
+    # modulation, env_brightness = aa.compute_modulation()
     # cv2.imwrite('output/abs_phase.png',result)
-    final = np.stack([result, modulation, env_brightness], axis = 2)
-    modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
-    cv2.imwrite('output/modulation.png',modulation)
-    cv2.imwrite('output/env_brightness.png',env_brightness)
+    # final = np.stack([result, modulation, env_brightness], axis = 2)
+    # modulation = cv2.GaussianBlur(modulation, (5, 5), 1.5)
+    # cv2.imwrite('output/modulation.png',modulation)
+    # cv2.imwrite('output/env_brightness.png',env_brightness)
 
-    mask = extra_region_through_binary(modulation)
-    cv2.imwrite('output/mask.png',mask)
+    # mask = extra_region_through_binary(modulation)
+    # cv2.imwrite('output/mask.png',mask)
 
-    gc = aa.get_graycodes(0.12)
-    cv2.imwrite('output/gc_mask.png',gc)
+    # gc = aa.get_graycodes(0.12)
+    # cv2.imwrite('output/gc_mask.png',gc)
 
-    final[mask==0] = 255
-    cv2.imwrite('output/result.png',final)
-    # get_modulations_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\modulations')
-    # get_masks_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\masks')
+    # final[mask==0] = 255
+    # cv2.imwrite('output/result.png',final)
+    # # get_modulations_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\modulations')
+    # # get_masks_from_datapath('D:\zhj\code\datapath\data_final', 'D:\zhj\code\datapath\masks')
+    cal_data_for_training(datafolder=r'D:\zhj\pmd\0418\data_final', savefolder= 'data', th_txt= 'th_2026v0.txt')
 
 
-
+                         
 
 
 

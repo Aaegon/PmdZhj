@@ -27,7 +27,7 @@ class Binariization():
         n:n副格雷码图像
         
     '''
-    def __init__(self, datapath, th, width = 2448, height = 2048,edge_length:int=2000):
+    def __init__(self, datapath, th, width = 2432, height = 2048,edge_length:int=2000):
         self.th1, self.th2, self.th3, self.th4, self.th5 = th
         self.datapath = datapath
         self.width = width
@@ -90,6 +90,9 @@ class Binariization():
         
         graycodes = self.get_GC_images()        #ndarray,(5,2048,2448)
         graycodes = torch.from_numpy(graycodes).to(self.device)
+
+        k = threshold / (threshold.max() + 1e-6)
+        offset *= k
         
         graycodes[0][graycodes[0] <= (threshold + self.th1*offset)] = 0
         graycodes[0][graycodes[0] > (threshold + self.th1*offset)] = 255
