@@ -12,6 +12,7 @@ def visualize_prediction(
     inputs,        # (C, H, W)  0: sinφ, 1: cosφ
     gt_order,      # (1, H, W) or (H, W)
     pred_order,    # (1, H, W) or (H, W)
+    wph,
     save_path,
     title=""
 ):
@@ -19,7 +20,8 @@ def visualize_prediction(
     # sin_phi = inputs[0].cpu().numpy()
     # cos_phi = inputs[1].cpu().numpy()
     # wrapped_phase = np.arctan2(sin_phi, cos_phi)
-    wrapped_phase = inputs[0].cpu().numpy()
+    wrapped_phase = wph.squeeze().cpu().numpy()
+    wrapped_phase = np.mod(wrapped_phase, 2 * np.pi)
 
     gt = gt_order.squeeze().cpu().numpy()
     pred = pred_order.squeeze().cpu().numpy()
@@ -88,7 +90,7 @@ def predict_and_visualize(
 
     # 2️⃣ 推理 + 画图
     with torch.no_grad():
-        for i, (inputs, gt_order, modulation) in enumerate(dataloader):
+        for i, (inputs, gt_order, modulation, wph) in enumerate(dataloader):
             if i >= max_vis:
                 break
 
@@ -102,6 +104,7 @@ def predict_and_visualize(
                 inputs[0],
                 gt_order[0],
                 pred_int[0],
+                wph,
                 save_path=os.path.join(save_dir, f"sample_{i}.png"),
                 title=f"Sample {i}"
             )
@@ -109,12 +112,12 @@ def predict_and_visualize(
     print(f"Saved visualizations to {save_dir}")
 
 def test():
-    dataset = FringeDataset("data", False)
+    dataset = FringeDataset("data", True)
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     predict_and_visualize(
         model_class=ResidualUNet,
-        model_kwargs={"in_channels": 2},
+        model_kwargs={"in_channels": 3},
         checkpoint_path="weights/best_fold_4.pth",
         dataloader=loader,
         device="cuda",
@@ -129,7 +132,7 @@ def train():
 
     print("Total samples:", num_samples)
 
-    dataset = FringeDataset(root_dir, use_sincos = False)
+    dataset = FringeDataset(root_dir, use_sincos = True)
     K = 5
     kf = KFold(n_splits=K, shuffle=True, random_state=42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -154,7 +157,7 @@ def train():
             num_workers=0
         )
 
-        model = ResidualUNet(in_channels=2).to(device)
+        model = ResidualUNet(in_channels=3).to(device)
         criterion = FringeOrderLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
@@ -166,15 +169,14 @@ def train():
             model.train()
             train_loss = 0.0
 
-            for inputs, gt_order, modulation in train_loader:
+            for inputs, gt_order, modulation, wph in train_loader:
                 inputs = inputs.to(device)
                 gt_order = gt_order.to(device)
                 modulation = modulation.to(device)
-
-                wph = inputs[:, 0]
+                wph = wph.to(device)
 
                 pred = model(inputs)
-                loss = criterion(pred, gt_order, modulation, wph)
+                loss = criterion(pred, gt_order, modulation, wph, epoch)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -190,7 +192,7 @@ def train():
             pm1_err = []
 
             with torch.no_grad():
-                for inputs, gt_order, modulation in val_loader:
+                for inputs, gt_order, modulation, wph in val_loader:
                     inputs = inputs.to(device)
                     gt_order = gt_order.to(device)
 
@@ -233,4 +235,5 @@ def train():
 
 
 if __name__ == "__main__":
-    test()
+    train()
+

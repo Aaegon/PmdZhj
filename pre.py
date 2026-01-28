@@ -215,7 +215,10 @@ def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_202
         savefile = os.path.join(savefolder, file) + '.npy'
         aa = PMD(path, th)
         wph, series, modulation = aa.compute_phase_series_modulations_cuda()
+        wph = (wph + np.pi) % (2 * np.pi) - np.pi
+        modulation = cv2.GaussianBlur(modulation, (5, 5), sigmaX=1.0)
         mod = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
+        mod = np.clip(mod, 0.0, 1.0)
         data = {
             "wph": wph.astype(np.float32),
             "modulation": mod.astype(np.float32),

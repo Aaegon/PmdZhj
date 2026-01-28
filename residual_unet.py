@@ -80,24 +80,22 @@ class FringeOrderLoss(nn.Module):
     - gradient LS (pred gradient vs GT gradient)
     - self-smoothness term (pred gradient magnitude)
     """
-    def __init__(self, grad_weight=0.4, self_grad_weight=0.1):
+    def __init__(self):
         """
         grad_weight:  GT gradient loss 权重
         self_grad_weight: 预测自身平滑约束权重
         """
         super().__init__()
-        self.grad_weight = grad_weight
-        self.self_grad_weight = self_grad_weight
 
-    def forward(self, pred, gt, modulation, wph):
+    def forward(self, pred, gt, modulation, wph, epoch):
         """
         pred, gt   : (B,1,H,W)   fringe order
         modulation : (B,1,H,W)   ∈ [0,1]
         wph        : (B,1,H,W)   wrapped phase
         """
+        wph = torch.where(wph < 0, wph + 2 * torch.pi, wph)
         # ===== 1. 数据项（最小二乘 order） =====
-        data_loss = (modulation * (pred - gt) ** 2).mean()
-
+        data_loss = (modulation * torch.abs(pred - gt)).mean()
         # ===== 2. 梯度约束：预测 vs GT =====
         abs_pred = wph + 2 * torch.pi * pred
         abs_gt   = wph + 2 * torch.pi * gt
@@ -109,18 +107,28 @@ class FringeOrderLoss(nn.Module):
         mod_y = modulation[:, :, 1:, :]
 
         grad_loss = (
-            (mod_x * (dx_p - dx_g) ** 2).mean() +
-            (mod_y * (dy_p - dy_g) ** 2).mean()
+            (mod_x * torch.abs(dx_p - dx_g)).mean() +
+            (mod_y * torch.abs(dy_p - dy_g)).mean()
         )
 
         # ===== 3. 自身最小二乘平滑约束 =====
         self_grad_loss = (
-            (dx_p ** 2 * mod_x).mean() +
-            (dy_p ** 2 * mod_y).mean()
+            (torch.abs(dx_p) * mod_x).mean() +
+            (torch.abs(dy_p) * mod_y).mean()
         )
 
         # ===== 总 loss =====
-        total_loss = data_loss + self.grad_weight * grad_loss + self.self_grad_weight * self_grad_loss
+        if epoch < 100:
+            grad_weight = 0
+            self_grad_weight = 0
+        if epoch>=100 and epoch<200:
+            grad_weight = 0.05
+            self_grad_weight = 0.5
+        else:
+            grad_weight = 0.01
+            self_grad_weight = 1
+
+        total_loss =  data_loss + grad_weight * grad_loss + self_grad_weight * self_grad_loss
         return total_loss
 
 if __name__ == "__main__":

@@ -46,8 +46,9 @@ class FringeDataset(Dataset):
         inputs = torch.from_numpy(inputs)
         order = torch.from_numpy(order).unsqueeze(0)            # (1,H,W)
         mod = torch.from_numpy(mod).unsqueeze(0)                # (1,H,W)
+        wph = torch.from_numpy(phi).unsqueeze(0)
 
-        return inputs, order, mod
+        return inputs, order, mod, wph
 
 def build_dataloader(
     root_dir,
