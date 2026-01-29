@@ -93,7 +93,7 @@ class FringeOrderLoss(nn.Module):
         modulation : (B,1,H,W)   ∈ [0,1]
         wph        : (B,1,H,W)   wrapped phase
         """
-        wph = torch.where(wph < 0, wph + 2 * torch.pi, wph)
+        # wph = wph % (2 * torch.pi)  # 将任意角度映射到 [0, 2π) 在训练仿真数据时这一段需要去掉
         # ===== 1. 数据项（最小二乘 order） =====
         data_loss = (modulation * torch.abs(pred - gt)).mean()
         # ===== 2. 梯度约束：预测 vs GT =====

@@ -216,7 +216,10 @@ def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_202
         aa = PMD(path, th)
         wph, series, modulation = aa.compute_phase_series_modulations_cuda()
         wph = (wph + np.pi) % (2 * np.pi) - np.pi
+
         modulation = cv2.GaussianBlur(modulation, (5, 5), sigmaX=1.0)
+        modulation = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
+        modulation = np.clip(modulation, 0.1, 0.9)
         mod = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
         mod = np.clip(mod, 0.0, 1.0)
         data = {
@@ -226,6 +229,55 @@ def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_202
         }
 
         np.save(savefile, data)
+
+def augment_and_save_dict_patches(source_dir, save_dir, patch_size=256, stride=128, m_threshold=20):
+    """
+    数据裁剪、增强
+    source_dir: 原始73个大字典.npy文件的路径
+    save_dir: 增强后切片字典的保存路径
+    """
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # 获取所有npy文件
+    npy_files = [f for f in os.listdir(source_dir) if f.endswith('.npy')]
+    patch_count = 0
+
+    for fname in npy_files:
+        # 1. 读取原始大图字典
+        data_dict = np.load(os.path.join(source_dir, fname), allow_pickle=True).item()
+        
+        # 提取各个组件 (请根据你实际的 Key 名匹配，如 'wph', 'series', 'modulation', 'fringes')
+        wph_full = data_dict['wph']          # [H, W]
+        series_full = data_dict['series']    # [H, W]
+        mod_full = data_dict['modulation']  # [H, W]
+        fringe_full = data_dict['fringes']    # [4, H, W]
+        
+        h, w = wph_full.shape
+
+        # 2. 滑动窗口切片
+        for y in range(0, h - patch_size, stride):
+            for x in range(0, w - patch_size, stride):
+                
+                # 判定调制度有效性
+                mod_patch = mod_full[y:y+patch_size, x:x+patch_size]
+                if np.mean(mod_patch) < m_threshold:
+                    continue # 剔除掉调制度过低的背景区域块
+
+                # 3. 构建新的切片字典
+                patch_dict = {
+                    'wph': wph_full[y:y+patch_size, x:x+patch_size].astype(np.float32),
+                    'series': series_full[y:y+patch_size, x:x+patch_size].astype(np.int64),
+                    'modulation': mod_patch.astype(np.float32),
+                    'fringes': fringe_full[:, y:y+patch_size, x:x+patch_size].astype(np.float32)
+                }
+
+                # 4. 以字典格式保存为新的 .npy
+                save_name = f"patch_{patch_count:05d}.npy"
+                np.save(os.path.join(save_dir, save_name), patch_dict)
+                patch_count += 1
+
+    print(f"数据增强完成！共生成有效 Patch 字典: {patch_count} 个")
 
 if __name__ == "__main__":
     # aa = PMD(datapath= r'D:\zhj\code\datapath\data_final\17', th =  [0.6, 1.9, 1.4, 1.2, 1.2])

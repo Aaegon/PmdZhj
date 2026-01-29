@@ -21,7 +21,7 @@ def visualize_prediction(
     # cos_phi = inputs[1].cpu().numpy()
     # wrapped_phase = np.arctan2(sin_phi, cos_phi)
     wrapped_phase = wph.squeeze().cpu().numpy()
-    wrapped_phase = np.mod(wrapped_phase, 2 * np.pi)
+    # wrapped_phase = np.mod(wrapped_phase, 2 * np.pi)
 
     gt = gt_order.squeeze().cpu().numpy()
     pred = pred_order.squeeze().cpu().numpy()
@@ -34,7 +34,7 @@ def visualize_prediction(
     abs_phase_pred = abs_phase_pred.astype(np.uint8)
 
     abs_phase_err = abs_phase_pred - abs_phase_gt
-    pm1_mask = (np.abs(pred - gt) > 1).astype(float)
+    pm1_mask = (np.abs(pred - gt) >= 1).astype(float)
 
     # -------- 可视化 --------
     fig, axs = plt.subplots(1, 4, figsize=(18, 4))
@@ -112,7 +112,7 @@ def predict_and_visualize(
     print(f"Saved visualizations to {save_dir}")
 
 def test():
-    dataset = FringeDataset("data", True)
+    dataset = FringeDataset("simulation_data", True)
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     predict_and_visualize(
@@ -126,7 +126,7 @@ def test():
     )
 
 def train():
-    root_dir = Path("data")
+    root_dir = Path("simulation_data")
     all_files = sorted(root_dir.glob("*.npy"))
     num_samples = len(all_files)
 
@@ -235,5 +235,6 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    test()
+    # train()
 
