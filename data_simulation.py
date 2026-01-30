@@ -1,155 +1,87 @@
 import numpy as np
-import matplotlib.pyplot as plt
+import cv2
 import os
-import random
-from scipy.ndimage import gaussian_filter
-from tqdm import tqdm
+from multiprocessing import Pool
 
-# ==========================================
-# 1. 单个样本生成函数
-# ==========================================
-def generate_sample(img_size=256, period=None, global_k_shift=0):
+def generate_and_save_single(args):
     """
-    生成单组高质量相位数据
-    :param global_k_shift: 全局级数偏移量，确保 k 从 0 开始
+    单个样本生成函数，供进程池调用
+    args: (idx, save_dir, patch_size, period, burr_strength)
     """
-    if period is None:
-        period = random.uniform(28, 42) # 随机周期增加泛化性
+    idx, save_dir, size, period, burr_strength = args
     
-    x_idx = np.arange(img_size)
-    y_idx = np.arange(img_size)
-    X, Y = np.meshgrid(x_idx, y_idx)
-    
-    # --- A. 随机贴边不规则掩模 (Mask) ---
-    num_stuck = random.randint(2, 4)
-    stuck_edges = random.sample(range(4), num_stuck) # 0:左, 1:右, 2:上, 3:下
-    
-    l = 0 if 0 in stuck_edges else random.randint(20, 50)
-    r = img_size if 1 in stuck_edges else random.randint(img_size-50, img_size-20)
-    t = 0 if 2 in stuck_edges else random.randint(20, 50)
-    b = img_size if 3 in stuck_edges else random.randint(img_size-50, img_size-20)
-    
-    mask_bool = np.ones((img_size, img_size), dtype=bool)
-    roughness, smooth = 4.0, 3.5
-    if 0 not in stuck_edges:
-        mask_bool &= (X > (l + gaussian_filter(np.random.randn(img_size)*roughness, sigma=smooth))[:, None])
-    if 1 not in stuck_edges:
-        mask_bool &= (X < (r + gaussian_filter(np.random.randn(img_size)*roughness, sigma=smooth))[:, None])
-    if 2 not in stuck_edges:
-        mask_bool &= (Y > (t + gaussian_filter(np.random.randn(img_size)*roughness, sigma=smooth))[None, :])
-    if 3 not in stuck_edges:
-        mask_bool &= (Y < (b + gaussian_filter(np.random.randn(img_size)*roughness, sigma=smooth))[None, :])
-    
-    mask = mask_bool.astype(np.float32)
+    # --- 1. 物理模型构建 ---
+    x = np.linspace(0, size-1, size)
+    y = np.linspace(0, size-1, size)
+    X, Y = np.meshgrid(x, y)
 
-    # --- B. 生成绝对相位 Phi ---
-    # 使用较宽的 X_offset 确保 Phi 始终为正
-    X_offset = 150 
-    surf_rand = np.random.randn(img_size, img_size) * 160
-    distort = gaussian_filter(surf_rand, sigma=random.uniform(15, 25))
-    Phi = (2 * np.pi / period) * (X + distort + X_offset)
+    # 单调背景 (上到下递增) + 随机低频波动
+    y_grad = np.random.uniform(0.7, 0.9)
+    low_freq = cv2.resize(np.random.normal(0, 1, (4, 4)), (size, size), interpolation=cv2.INTER_CUBIC)
+    abs_phase_ideal = (y_grad * Y + low_freq * 3) * (2 * np.pi / period)
+    abs_phase_ideal += np.random.uniform(0, 50) 
 
-    # --- C. 真实感噪声 (底噪 + 跳变处轻微抖动) ---
-    base_noise = np.random.normal(0, 0.02, (img_size, img_size))
-    jump_weight = np.exp(-((np.cos(Phi) + 1)**2) / 0.005) 
-    jitter_noise = np.random.normal(0, 0.06, (img_size, img_size)) * jump_weight
+    # 局部缺陷模拟 (凹陷/划痕)
+    defect = np.zeros_like(X)
+    if np.random.rand() > 0.2: # 80% 的样本包含缺陷
+        cx, cy = np.random.uniform(size//4, 3*size//4, 2)
+        sigma = np.random.uniform(1.5, 5)
+        amp = np.random.uniform(0.3, 1.5)
+        defect = amp * np.exp(-((X-cx)**2 + (Y-cy)**2) / (2*sigma**2))
     
-    # 生成带噪声的包裹相位
-    wrapped_phase = np.arctan2(np.sin(Phi + base_noise + jitter_noise), 
-                               np.cos(Phi + base_noise + jitter_noise))
-    
-    # --- D. 计算级数 k 并对齐 ---
-    k_order_raw = np.round((Phi - wrapped_phase) / (2 * np.pi)).astype(np.int32)
-    
-    # 执行全局对齐 (k = k_raw - global_min)
-    k_final = k_order_raw - global_k_shift
-    
-    # 背景处理：mask外设为 -1 (ignore_index)
-    k_final[mask == 0] = -1
-    wrapped_phase *= mask # 背景设为 0
-    
-    # 调制度 (Modulation) 模拟有效区域
-    modulation = gaussian_filter(mask, sigma=1.0) * 0.9 + 0.05
+    abs_phase_physical = abs_phase_ideal + (defect * (2 * np.pi / period))
 
-    return wrapped_phase, modulation, k_final, Phi, mask
+    # --- 2. 互相关毛刺噪声生成 ---
+    # 模拟传感器不确定性导致的共模噪声
+    raw_noise = np.random.normal(0, 0.1 * burr_strength, (size, size))
+    smooth_noise = cv2.GaussianBlur(raw_noise, (3, 3), 0)
+    abs_phase_observed = abs_phase_physical + smooth_noise
 
-# ==========================================
-# 2. 单个样本可视化函数
-# ==========================================
-def visualize_sample():
-    # 临时生成一个不带偏移的样本查看范围
-    w, m, k, phi, mask = generate_sample(global_k_shift=0)
-    
-    # 找出该样本有效区域的最小 k 作为演示偏移
-    k_min = k[mask > 0].min()
-    k -= k_min
-    k[mask == 0] = -1
+    # 生成带毛刺的级数 k 和 折叠相位 wph
+    k_series = np.floor(abs_phase_observed / (2 * np.pi)).astype(np.int64)
+    wph = np.mod(abs_phase_observed, 2 * np.pi)
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    # --- 3. 条纹图与调制度 ---
+    A_light = np.random.uniform(100, 140)
+    B_mod = np.random.uniform(70, 100)
+    # 局部调制度衰减 (模拟漆面反光不均或缺陷处的对比度下降)
+    mod_map = B_mod * (1 - 0.2 * defect / np.max(defect + 1e-6)) 
     
-    # 1. 包裹相位
-    axes[0].imshow(((w + np.pi) / (2 * np.pi) * 255).astype(np.uint8), cmap='gray')
-    axes[0].set_title("Input: Wrapped Phase (Gray)")
+    fringes = []
+    for i in range(4):
+        p_noise = np.random.normal(0, 1.5, (size, size))
+        I = A_light + mod_map * np.cos(wph - i * np.pi/2) + p_noise
+        fringes.append(np.clip(I, 0, 255).astype(np.uint8))
     
-    # 2. 调制度/掩模
-    im1 = axes[1].imshow(m, cmap='magma')
-    axes[1].set_title("Input: Modulation / Mask")
-    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    
-    # 3. 级数标签 (k 从 0 开始)
-    k_show = np.ma.masked_where(k == -1, k)
-    im2 = axes[2].imshow(k_show, cmap='jet')
-    axes[2].set_title(f"Label: Fringe Order k\n(Starts from 0)")
-    plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    
-    # 4. 绝对相位 (Ground Truth)
-    phi_show = np.ma.masked_where(mask == 0, phi)
-    im3 = axes[3].imshow(phi_show, cmap='viridis')
-    axes[3].set_title("Info: Absolute Phase ($\Phi$)")
-    plt.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
-    
-    plt.tight_layout()
-    plt.show()
+    # --- 4. 封装字典并保存 ---
+    # 归一化处理：wph映射到 [0, 1], modulation映射到 [0, 1]
+    sample_dict = {
+        'fringes': np.stack(fringes, axis=0).astype(np.float32) / 255.0,
+        'wph': (wph / (2 * np.pi)).astype(np.float32),
+        'series': k_series, # 注意：级数保持原始整数
+        'modulation': (mod_map / 255.0).astype(np.float32),
+        'abs_phase_gt': abs_phase_physical.astype(np.float32)
+    }
+    save_path = os.path.join(save_dir, f"sim_{idx:06d}.npy")
+    np.save(save_path, sample_dict)
 
-# ==========================================
-# 3. 批量生成函数
-# ==========================================
-def batch_generate(save_dir, num_samples=1000):
+def batch_generate_multiprocess(total_count, save_dir, num_workers=8):
+    """
+    多进程批量生成
+    """
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
-    # --- 第一步：确定全局级数偏移量 ---
-    # 随机生成 50 组样本，找出一个能让所有样本 k 都 >= 0 的全局最小值
-    print("正在计算全局级数偏移量...")
-    mins = []
-    for _ in range(50):
-        _, _, k, _, mask = generate_sample(img_size = 256, global_k_shift=0)
-        if np.any(mask > 0):
-            mins.append(k[mask > 0].min())
-    global_min_k = min(mins)
-    print(f"确定的全局最小级数为: {global_min_k}，所有数据将以此对齐。")
-
-    # --- 第二步：批量生成并保存 ---
-    print(f"开始生成数据集至: {save_dir}")
-    for i in tqdm(range(num_samples)):
-        w, m, k, _, _ = generate_sample(img_size = 256, global_k_shift=global_min_k)
-        
-        sample_dict = {
-            'wph': w.astype(np.float32),
-            'modulation': m.astype(np.float32),
-            'series': k.astype(np.int16)
-        }
-        
-        np.save(os.path.join(save_dir, f"sample_{i:05d}.npy"), sample_dict)
+    print(f"开始生成 {total_count} 个仿真样本，使用 {num_workers} 个核心...")
     
-    print("任务完成！")
+    # 准备任务参数列表
+    tasks = [(i, save_dir, 256, 32, 2.0) for i in range(total_count)]
+    
+    with Pool(num_workers) as p:
+        p.map(generate_and_save_single, tasks)
+        
+    print("生成任务全部完成！")
 
-# ==========================================
-# 主程序入口
-# ==========================================
 if __name__ == "__main__":
-    # 选项 1: 可视化检查效果
-    # visualize_sample()
-    
-    # 选项 2: 正式批量生成 (示例生成 100 组)
-    batch_generate("./simulation_data", num_samples=1000)
+    # 建议先生成 10000 组用于阶段 A 预训练
+    batch_generate_multiprocess(total_count=100, save_dir='./sim_dataset_A', num_workers=os.cpu_count())

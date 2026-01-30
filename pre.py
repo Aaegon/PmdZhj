@@ -104,7 +104,7 @@ class PMD():
 
         # 计算调制度  
         modulation, _ = W.computeModulation(I)
-        return wph.cpu().numpy(), abs_series.cpu().numpy(), modulation.cpu().numpy()
+        return wph.cpu().numpy(), abs_series.cpu().numpy(), modulation.cpu().numpy(), I
     
     def get_raw_modulation(self):
         datapath = self.datapath
@@ -191,6 +191,7 @@ def visualize_demo(img, savepath):
 def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_2026v0.txt'):
     '''
     保存数据：
+    四步相移 fringes
     折叠相位 wrapped_phase float32
     调制度   modulation    float32
     相位级数 series        int
@@ -214,20 +215,21 @@ def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_202
         path = os.path.join(datafolder, file)
         savefile = os.path.join(savefolder, file) + '.npy'
         aa = PMD(path, th)
-        wph, series, modulation = aa.compute_phase_series_modulations_cuda()
-        wph = (wph + np.pi) % (2 * np.pi) - np.pi
+        wph, series, modulation, fringes = aa.compute_phase_series_modulations_cuda()
+        # wph = (wph + np.pi) % (2 * np.pi) - np.pi
 
-        modulation = cv2.GaussianBlur(modulation, (5, 5), sigmaX=1.0)
-        modulation = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
-        modulation = np.clip(modulation, 0.1, 0.9)
-        mod = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
-        mod = np.clip(mod, 0.0, 1.0)
+        # modulation = cv2.GaussianBlur(modulation, (5, 5), sigmaX=1.0)
+        # modulation = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
+        # modulation = np.clip(modulation, 0.1, 0.9)
+        # mod = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
+        # mod = np.clip(mod, 0.0, 1.0)
+        mod = np.clip(modulation, 0.0, 0.9)
         data = {
+            'fringes': np.stack(fringes, axis=0).astype(np.float32) / 255.0,
             "wph": wph.astype(np.float32),
-            "modulation": mod.astype(np.float32),
-            "series": series.astype(np.int16)
+            "modulation": (mod).astype(np.float32),
+            "series": series.astype(np.int64)
         }
-
         np.save(savefile, data)
 
 def augment_and_save_dict_patches(source_dir, save_dir, patch_size=256, stride=128, m_threshold=20):

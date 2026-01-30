@@ -6,235 +6,96 @@ import os
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import KFold
 from dataset import FringeDataset
-from residual_unet import ResidualUNet, ResBlock, FringeOrderLoss
+from deflect_unet import DeflectoNet, PhasePatchDataset
 
-def visualize_prediction(
-    inputs,        # (C, H, W)  0: sinφ, 1: cosφ
-    gt_order,      # (1, H, W) or (H, W)
-    pred_order,    # (1, H, W) or (H, W)
-    wph,
-    save_path,
-    title=""
-):
-    # -------- 计算 wrapped phase --------
-    # sin_phi = inputs[0].cpu().numpy()
-    # cos_phi = inputs[1].cpu().numpy()
-    # wrapped_phase = np.arctan2(sin_phi, cos_phi)
-    wrapped_phase = wph.squeeze().cpu().numpy()
-    # wrapped_phase = np.mod(wrapped_phase, 2 * np.pi)
-
-    gt = gt_order.squeeze().cpu().numpy()
-    pred = pred_order.squeeze().cpu().numpy()
-
-    # -------- 绝对相位 --------
-    abs_phase_gt = (wrapped_phase + 2 * np.pi * gt)*255/(2**5*np.pi)
-    abs_phase_pred = (wrapped_phase + 2 * np.pi * pred)*255/(2**5*np.pi)
-
-    abs_phase_gt = abs_phase_gt.astype(np.uint8)
-    abs_phase_pred = abs_phase_pred.astype(np.uint8)
-
-    abs_phase_err = abs_phase_pred - abs_phase_gt
-    pm1_mask = (np.abs(pred - gt) >= 1).astype(float)
-
-    # -------- 可视化 --------
-    fig, axs = plt.subplots(1, 4, figsize=(18, 4))
-
-    im0 = axs[0].imshow((abs_phase_gt), cmap="gray")
-    axs[0].set_title("GT Absolute Phase")
-    plt.colorbar(im0, ax=axs[0], fraction=0.046)
-
-    im1 = axs[1].imshow((abs_phase_pred), cmap="gray")
-    axs[1].set_title("Pred Absolute Phase")
-    plt.colorbar(im1, ax=axs[1], fraction=0.046)
-
-    im2 = axs[2].imshow(abs_phase_err, cmap="bwr")
-    axs[2].set_title("Abs Phase Error")
-    plt.colorbar(im2, ax=axs[2], fraction=0.046)
-
-    im3 = axs[3].imshow(pm1_mask, cmap="gray")
-    axs[3].set_title("|Order Error| > 1")
-
-    for ax in axs:
-        ax.axis("off")
-
-    plt.suptitle(title)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-
-def predict_and_visualize(
-    model_class,
-    model_kwargs,
-    checkpoint_path,
-    dataloader,
-    device="cuda",
-    save_dir="pred_vis",
-    max_vis=10
-):
-    """
-    model_class: ResidualUNet
-    model_kwargs: dict, e.g. {"in_channels": 3}
-    checkpoint_path: .pth file
-    dataloader: DataLoader
-    """
-
-    os.makedirs(save_dir, exist_ok=True)
-
-    # 1️⃣ 构建 & 加载模型
-    model = model_class(**model_kwargs).to(device)
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(state_dict)
+def visualize_prediction(model_path, test_data_path, device='cuda', num_classes=15):
+    '''
+    用训练完的模型进行可视化的函数
+    '''
+    # 1. 初始化模型并加载权重
+    model = DeflectoNet(num_classes=num_classes).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    print(f"Loaded model from {checkpoint_path}")
+    # 2. 加载单组测试数据
+    data = np.load(test_data_path, allow_pickle=True).item()
+    
+    # 预处理输入 (与 Dataset 逻辑一致)
+    fringes = data['fringes'].astype(np.float32) 
+    wph_norm = (data['wph'] / (2 * np.pi)).astype(np.float32)
+    mod_norm = data['modulation'].astype(np.float32)
+    
+    # 组装输入 [1, 6, H, W]
+    x_input = np.concatenate([fringes, wph_norm[np.newaxis, ...], mod_norm[np.newaxis, ...]], axis=0)
+    x_tensor = torch.from_numpy(x_input).unsqueeze(0).to(device)
 
-    # 2️⃣ 推理 + 画图
+    # 3. 模型推理
     with torch.no_grad():
-        for i, (inputs, gt_order, modulation, wph) in enumerate(dataloader):
-            if i >= max_vis:
-                break
+        output = model(x_tensor)
+        # 获取预测级数 (取概率最大的索引)
+        pred_series = torch.argmax(output, dim=1).cpu().numpy()[0]
+    
+    # 4. 绝对相位重构与偏差计算
+    # 注意：模型预测的是相对级次，需要加上原始 Patch 的偏移量或只对比相对值
+    # 这里我们对比相对偏差，因为绝对相位的整体平移不影响缺陷检测
+    phi_wrapped = data['wph'] *2*np.pi
+    # abs_phase_gt = data['abs_phase_gt']
+    
+    # 重构绝对相位: Phi = phi + 2 * pi * (k_pred + offset)
+    # 为了对比方便，我们将预测的级次序列平移到与 GT 相同的量级
+    gt_series = data['series'].astype(np.uint64)
+    k_offset = np.min(gt_series)
+    abs_phase_gt = phi_wrapped + 2 * np.pi * gt_series
+    recon_abs = phi_wrapped + 2 * np.pi * (pred_series + k_offset)
+    
+    # 计算偏差 (预测 - 真值)
+    # 理想情况下，这个图中不应有 2pi 的阶跃，只有细小的毛刺噪声
+    residual = recon_abs - abs_phase_gt
 
-            inputs = inputs.to(device)
-            gt_order = gt_order.to(device)
+    # 5. 绘图
+    plt.figure(figsize=(20, 10))
+    
+    plt.subplot(2, 3, 1)
+    plt.imshow(phi_wrapped, cmap='gray')
+    plt.title('Wrapped Phase (Input)')
+    plt.axis('off')
 
-            pred = model(inputs)
-            pred_int = torch.round(pred)
-            
-            visualize_prediction(
-                inputs[0],
-                gt_order[0],
-                pred_int[0],
-                wph,
-                save_path=os.path.join(save_dir, f"sample_{i}.png"),
-                title=f"Sample {i}"
-            )
+    plt.subplot(2, 3, 2)
+    plt.imshow(pred_series, cmap='jet')
+    plt.title('Predicted K Series')
+    plt.axis('off')
 
-    print(f"Saved visualizations to {save_dir}")
+    plt.subplot(2, 3, 3)
+    plt.imshow(recon_abs, cmap='gray')
+    plt.title('Reconstructed Absolute Phase')
+    plt.axis('off')
 
-def test():
-    dataset = FringeDataset("simulation_data", True)
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    plt.subplot(2, 3, 4)
+    plt.imshow(abs_phase_gt, cmap='gray')
+    plt.title('Ground Truth Absolute Phase')
+    plt.axis('off')
 
-    predict_and_visualize(
-        model_class=ResidualUNet,
-        model_kwargs={"in_channels": 3},
-        checkpoint_path="weights/best_fold_4.pth",
-        dataloader=loader,
-        device="cuda",
-        save_dir="vis_best_fold_4",
-        max_vis=10
-    )
+    plt.subplot(2, 3, 5)
+    # 偏差值可视化，使用 RdBu 色标观察正负偏差
+    plt.imshow(residual, cmap='RdBu', vmin=-1, vmax=1)
+    plt.colorbar(label='Radians')
+    plt.title('Prediction Residual (Error Map)')
+    plt.axis('off')
 
-def train():
-    root_dir = Path("simulation_data")
-    all_files = sorted(root_dir.glob("*.npy"))
-    num_samples = len(all_files)
+    plt.subplot(2, 3, 6)
+    # 绘制一行剖面线对比，最直观看到跳变处是否平滑
+    mid_row = pred_series.shape[0] // 2
+    plt.plot(abs_phase_gt[mid_row, :], label='GT', color='black', alpha=0.5)
+    plt.plot(recon_abs[mid_row, :], label='Pred', linestyle='--', color='red')
+    plt.title(f'Cross-section at Row {mid_row}')
+    plt.legend()
 
-    print("Total samples:", num_samples)
+    plt.tight_layout()
+    plt.show()
 
-    dataset = FringeDataset(root_dir, use_sincos = True)
-    K = 5
-    kf = KFold(n_splits=K, shuffle=True, random_state=42)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    fold_results = []
-
-    for fold, (train_idx, val_idx) in enumerate(kf.split(range(len(dataset)))):
-        print(f"\n========== Fold {fold+1}/{K} ==========")
-
-        train_set = Subset(dataset, train_idx)
-        val_set = Subset(dataset, val_idx)
-
-        train_loader = DataLoader(
-            train_set,
-            batch_size=1,
-            shuffle=True,
-            num_workers=0
-        )
-        val_loader = DataLoader(
-            val_set,
-            batch_size=1,
-            shuffle=False,
-            num_workers=0
-        )
-
-        model = ResidualUNet(in_channels=3).to(device)
-        criterion = FringeOrderLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-
-        best_val_err = 1e9
-        best_state = None
-
-        # -------- 训练 --------
-        for epoch in range(200):
-            model.train()
-            train_loss = 0.0
-
-            for inputs, gt_order, modulation, wph in train_loader:
-                inputs = inputs.to(device)
-                gt_order = gt_order.to(device)
-                modulation = modulation.to(device)
-                wph = wph.to(device)
-
-                pred = model(inputs)
-                loss = criterion(pred, gt_order, modulation, wph, epoch)
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                train_loss += loss.item()
-
-            train_loss /= len(train_loader)
-
-            # -------- 验证 --------
-            model.eval()
-            abs_err = []
-            pm1_err = []
-
-            with torch.no_grad():
-                for inputs, gt_order, modulation, wph in val_loader:
-                    inputs = inputs.to(device)
-                    gt_order = gt_order.to(device)
-
-                    pred = model(inputs)
-                    pred_int = torch.round(pred)
-
-                    diff = torch.abs(pred_int - gt_order)
-
-                    abs_err.append(diff.mean().item())
-                    pm1_err.append((diff > 1).float().mean().item())
-
-            mean_abs_err = np.mean(abs_err)
-            mean_pm1 = np.mean(pm1_err)
-
-            print(
-                f"Epoch {epoch:03d} | "
-                f"Train {train_loss:.4f} | "
-                f"Val MAE {mean_abs_err:.4f} | "
-                f">±1 {mean_pm1:.4f}"
-            )
-
-            # -------- 选最稳模型（不是最小 loss） --------
-            if mean_pm1 < best_val_err:
-                best_val_err = mean_pm1
-                best_state = model.state_dict()
-
-        # 保存这一折的最佳模型
-        torch.save(best_state, f"weights/best_fold_{fold}.pth")
-
-        fold_results.append({
-            "fold": fold,
-            "pm1_error": best_val_err,
-        })
-    print("\n====== K-fold Summary ======")
-    for r in fold_results:
-        print(f"Fold {r['fold']} | >±1 error: {r['pm1_error']:.4f}")
-
-    best_fold = min(fold_results, key=lambda x: x["pm1_error"])
-    print("\nBest fold:", best_fold)
-
+# 使用示例
+# visualize_prediction('deflecto_net_pretrained.pth', './sim_dataset_A/sim_000001.npy')
 
 if __name__ == "__main__":
-    test()
-    # train()
+    visualize_prediction('weights/deflecto_net_pretrained200.pth', './sim_dataset_A/sim_000018.npy')
 
