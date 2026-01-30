@@ -224,12 +224,14 @@ def cal_data_for_training(datafolder = None, savefolder = None, th_txt = 'th_202
         # mod = (modulation - modulation.min())/(modulation.max() - modulation.min() + 1e-8)
         # mod = np.clip(mod, 0.0, 1.0)
         mod = np.clip(modulation, 0.0, 0.9)
+        series = np.clip(series, 0.0, 15.0)
         data = {
             'fringes': np.stack(fringes, axis=0).astype(np.float32) / 255.0,
             "wph": wph.astype(np.float32),
             "modulation": (mod).astype(np.float32),
             "series": series.astype(np.int64)
         }
+        #print(np.percentile(series,5), np.percentile(series,94),np.percentile(series,95),np.percentile(series,96),np.percentile(series,97))
         np.save(savefile, data)
 
 def augment_and_save_dict_patches(source_dir, save_dir, patch_size=256, stride=128, m_threshold=20):
