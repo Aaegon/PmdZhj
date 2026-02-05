@@ -132,7 +132,7 @@ def train_phase_unwrapping():
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     print("Starting Phase A Pre-training...")
-    for epoch in range(200):
+    for epoch in range(100):
         model.train()
         epoch_loss = 0
         
@@ -154,8 +154,58 @@ def train_phase_unwrapping():
 
     torch.save(model.state_dict(), "deflecto_net_pretrained.pth")
 
-def visualize_prediction(model, datafolder, savefolder, device="cuda",):
-    pass
+
+def fine_tune_on_real_data(model_path, real_data_dir, epochs=20):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = DeflectoNet(num_classes=15).to(device)
+    model.load_state_dict(torch.load(model_path))
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
+    criterion = DeflectoLoss(tv_weight=0.02)
+
+    # 建议加上 drop_last=True 防止最后一个 batch 只有一个样本导致 BatchNorm 报错
+    real_dataset = PhasePatchDataset(real_data_dir) # 假设你已经用了 Patch 采样逻辑
+    real_loader = torch.utils.data.DataLoader(real_dataset, batch_size=2, shuffle=True, drop_last=True)
+
+    accumulation_steps = 8
+    print(f"Starting Phase B: Fine-tuning. Effective Batch Size: {2 * accumulation_steps}")
+
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0
+        optimizer.zero_grad() # 每个 epoch 开始前确保清零
+
+        for i, (x, y) in enumerate(real_loader):
+            x, y = x.to(device), y.to(device)
+            mod_mask = x[:, 5, :, :] 
+            
+            # 1. 前向传播
+            outputs = model(x.contiguous()) # 确保连续内存
+            
+            # 2. 计算 Loss 并缩放
+            loss = criterion(outputs, y, mod_mask)
+            loss_scaled = loss / accumulation_steps # 梯度累加需要对 loss 进行平均
+            
+            # 3. 反向传播（累加梯度）
+            loss_scaled.backward()
+
+            # 4. 权重更新
+            if (i + 1) % accumulation_steps == 0:
+                # 加上梯度裁剪防止 NaN
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad() # 更新完后再清零，为下 8 个步骤做准备
+            
+            # 记录原始 loss (不缩放的) 用于观察
+            epoch_loss += loss.item()
+
+        print(f"Epoch {epoch+1}/{epochs} | Avg Loss: {epoch_loss / len(real_loader):.6f}")
+        
+        # 每 10 个 epoch 保存一次
+        if (epoch + 1) % 10 == 0:
+            torch.save(model.state_dict(), f"deflecto_net_0205_epoch_{epoch+1}.pth")  
+          
 
 if __name__ == "__main__":
-    train_phase_unwrapping()
+    fine_tune_on_real_data('weights/deflecto_net_trained_0205_epoch_60.pth', 'data', epochs=100)
+    # train_phase_unwrapping()
