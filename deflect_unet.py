@@ -84,6 +84,11 @@ class PhasePatchDataset(torch.utils.data.Dataset):
         fringes = data['fringes'].astype(np.float32) # [4, H, W], 已归一化
         wph = data['wph'][np.newaxis, ...].astype(np.float32) / (2 * np.pi) # [1, H, W]
         mod = data['modulation'][np.newaxis, ...].astype(np.float32) # [1, H, W]
+
+        #做一下置信度强化
+        mod = (mod**3)/0.5
+        mod_unval_idx = mod<0.1
+        mod[mod_unval_idx] = 0
         
         x_input = np.concatenate([fringes, wph, mod], axis=0)
         
@@ -95,29 +100,57 @@ class PhasePatchDataset(torch.utils.data.Dataset):
         return torch.from_numpy(x_input), torch.from_numpy(target)
     
 class DeflectoLoss(nn.Module):
-    def __init__(self, tv_weight=0.01):
+    def __init__(self, tv_weight=0.02, grad_weight=0.01):
         super(DeflectoLoss, self).__init__()
-        self.ce_loss = nn.CrossEntropyLoss(reduction='none') # 设置为none以便应用掩模
+        self.ce_loss = nn.CrossEntropyLoss(reduction='none')
         self.tv_weight = tv_weight
+        self.grad_weight = grad_weight
 
-    def forward(self, pred, target, mod_mask):
-        """
-        pred: [B, num_classes, H, W]
-        target: [B, H, W]
-        mod_mask: 调制度掩模 [B, H, W], 来自输入的第6通道
-        """
-        # 1. 基础分类 Loss (仅在有效调制度区域计算)
-        ce = self.ce_loss(pred, target) 
-        # 使用调制度作为权重，mod低的地方loss贡献小
-        weighted_ce = (ce * mod_mask).mean()
+    def compute_gradient(self, img):
+        grad_x = img[:, :, :, 1:] - img[:, :, :, :-1]
+        grad_y = img[:, :, 1:, :] - img[:, :, :-1, :]
+        return grad_x, grad_y
 
-        # 2. TV Loss (抑制级次预测碎噪点)
-        # 对预测概率图求空间梯度
-        prob = F.softmax(pred, dim=1)
-        tv_h = torch.pow(prob[:, :, 1:, :] - prob[:, :, :-1, :], 2).mean()
-        tv_w = torch.pow(prob[:, :, :, 1:] - prob[:, :, :, :-1], 2).mean()
+    def forward(self, pred_logits, target, mod_mask, wph):
+        """
+        pred_logits: [B, num_classes, H, W]
+        target: [B, H, W] - 级数标签
+        mod_mask: [B, 1, H, W] - 调制度
+        wph: [B, 1, H, W] - 输入的归一化折叠相位
+        """
+        # 1. 基础分类损失 (交叉熵)
+        # target 不需要 unsqueeze，CE 会处理
+        ce = self.ce_loss(pred_logits, target) 
+        weighted_ce = (ce * mod_mask.squeeze(1)).mean()
+
+        # 2. 梯度一致性损失 (Gradient Loss)
+        # 计算软级数 k_soft
+        probs = torch.softmax(pred_logits, dim=1)
+        indices = torch.arange(pred_logits.shape[1]).float().to(pred_logits.device).view(1, -1, 1, 1)
+        k_soft = torch.sum(probs * indices, dim=1, keepdim=True)
         
-        return weighted_ce + self.tv_weight * (tv_h + tv_w)
+        # 合成归一化绝对相位
+        phi_pred = wph + k_soft
+        phi_gt = wph + target.unsqueeze(1).float()
+        
+        # 计算梯度并加权
+        pred_gx, pred_gy = self.compute_gradient(phi_pred)
+        gt_gx, gt_gy = self.compute_gradient(phi_gt)
+        
+        # 调制度切片以对齐梯度图
+        mod_x = mod_mask[:, :, :, :-1]
+        mod_y = mod_mask[:, :, :-1, :]
+        
+        loss_grad = torch.mean(torch.abs(pred_gx - gt_gx) * mod_x) + torch.mean(torch.abs(pred_gy - gt_gy) * mod_y)
+
+        # 3. TV 正则化 (保持级数图平滑)
+        tv_h = torch.pow(probs[:, :, 1:, :] - probs[:, :, :-1, :], 2).mean()
+        tv_w = torch.pow(probs[:, :, :, 1:] - probs[:, :, :, :-1], 2).mean()
+        loss_tv = tv_h + tv_w
+
+        # 总损失
+        total_loss = weighted_ce + self.grad_weight * loss_grad + self.tv_weight * loss_tv
+        return total_loss
 
 def train_phase_unwrapping():
     # 配置
@@ -128,7 +161,7 @@ def train_phase_unwrapping():
     dataset = PhasePatchDataset('./sim_dataset_A')
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=16, shuffle=True)
     
-    criterion = DeflectoLoss(tv_weight=0.05)
+    criterion = DeflectoLoss(tv_weight=0.02)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     print("Starting Phase A Pre-training...")
@@ -160,8 +193,8 @@ def fine_tune_on_real_data(model_path, real_data_dir, epochs=20):
     model = DeflectoNet(num_classes=15).to(device)
     model.load_state_dict(torch.load(model_path))
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
-    criterion = DeflectoLoss(tv_weight=0.02)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    criterion = DeflectoLoss(tv_weight=0.02, grad_weight = 0)
 
     # 建议加上 drop_last=True 防止最后一个 batch 只有一个样本导致 BatchNorm 报错
     real_dataset = PhasePatchDataset(real_data_dir) # 假设你已经用了 Patch 采样逻辑
@@ -177,13 +210,14 @@ def fine_tune_on_real_data(model_path, real_data_dir, epochs=20):
 
         for i, (x, y) in enumerate(real_loader):
             x, y = x.to(device), y.to(device)
-            mod_mask = x[:, 5, :, :] 
+            mod_mask = x[:, 5:6, :, :] 
+            wph = x[:, 4:5, :, :]
             
             # 1. 前向传播
             outputs = model(x.contiguous()) # 确保连续内存
             
             # 2. 计算 Loss 并缩放
-            loss = criterion(outputs, y, mod_mask)
+            loss = criterion(outputs, y, mod_mask, wph)
             loss_scaled = loss / accumulation_steps # 梯度累加需要对 loss 进行平均
             
             # 3. 反向传播（累加梯度）
@@ -203,9 +237,9 @@ def fine_tune_on_real_data(model_path, real_data_dir, epochs=20):
         
         # 每 10 个 epoch 保存一次
         if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), f"deflecto_net_0205_epoch_{epoch+1}.pth")  
+            torch.save(model.state_dict(), f"deflecto_net_0206_epoch_{epoch+1}.pth")  
           
 
 if __name__ == "__main__":
-    fine_tune_on_real_data('weights/deflecto_net_trained_0205_epoch_60.pth', 'data', epochs=100)
+    fine_tune_on_real_data('weights/deflecto_net_pretrained100_0203.pth', 'data', epochs=100)
     # train_phase_unwrapping()
